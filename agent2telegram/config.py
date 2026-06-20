@@ -34,6 +34,7 @@ class Config:
     continue_command: list[str] | None = None   # optional override of the follow-up command
     agent_timeout: int = 600            # seconds before a single agent run is killed
     poll_timeout: int = 50              # long-poll timeout for getUpdates
+    elevenlabs_api_key: str = ""        # optional: enables voice-message transcription (STT)
 
     def path_workdir(self) -> Path:
         base = Path(self.workdir).expanduser() if self.workdir else (_state_dir() / "chats")
@@ -54,6 +55,7 @@ class Config:
         d = asdict(self)
         tok = self.token or ""
         d["token"] = (tok[:6] + "…" + tok[-2:]) if len(tok) > 10 else "…"
+        d["elevenlabs_api_key"] = "set" if self.elevenlabs_api_key else ""
         return d
 
 
@@ -77,9 +79,11 @@ def load(path: Path | None = None) -> Config:
         raw = json.loads(p.read_text("utf-8"))
     except json.JSONDecodeError as e:
         raise ConfigError(f"Config at {p} is not valid JSON: {e}") from e
-    # A token may also come from the environment, keeping it out of the file entirely.
+    # Secrets may also come from the environment, keeping them out of the file entirely.
     if env_token := os.environ.get("TELEGRAM_BOT_TOKEN"):
         raw["token"] = env_token
+    if env_key := os.environ.get("ELEVENLABS_API_KEY"):
+        raw["elevenlabs_api_key"] = env_key
     known = {f for f in Config.__dataclass_fields__}
     cfg = Config(**{k: v for k, v in raw.items() if k in known})
     cfg.validate()

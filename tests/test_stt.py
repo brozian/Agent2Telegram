@@ -1,0 +1,58 @@
+"""Tests for the ElevenLabs Scribe speech-to-text integration — no network."""
+import io
+import json
+import unittest
+
+from agent2telegram import stt
+
+
+class _Resp(io.BytesIO):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        self.close()
+
+
+class _FakeOpener:
+    def __init__(self, payload):
+        self.payload = payload
+        self.last_request = None
+
+    def open(self, req, timeout=None):
+        self.last_request = req
+        return _Resp(json.dumps(self.payload).encode())
+
+
+class STTTests(unittest.TestCase):
+    def test_transcribes_text(self):
+        op = _FakeOpener({"text": "hello world"})
+        out = stt.transcribe_elevenlabs(b"audio", api_key="k", opener=op)
+        self.assertEqual(out, "hello world")
+
+    def test_uses_scribe_model_in_multipart(self):
+        op = _FakeOpener({"text": "x"})
+        stt.transcribe_elevenlabs(b"audio", api_key="k", opener=op)
+        body = op.last_request.data
+        self.assertIn(b"scribe_v1", body)
+        self.assertIn(b'name="file"', body)
+        self.assertIn(b"audio", body)
+
+    def test_sends_api_key_header(self):
+        op = _FakeOpener({"text": "x"})
+        stt.transcribe_elevenlabs(b"audio", api_key="secret-key", opener=op)
+        # urllib normalizes header keys to title-case
+        self.assertEqual(op.last_request.headers.get("Xi-api-key"), "secret-key")
+
+    def test_missing_key_raises(self):
+        with self.assertRaises(stt.STTError):
+            stt.transcribe_elevenlabs(b"audio", api_key="")
+
+    def test_empty_transcription_raises(self):
+        op = _FakeOpener({"text": ""})
+        with self.assertRaises(stt.STTError):
+            stt.transcribe_elevenlabs(b"audio", api_key="k", opener=op)
+
+
+if __name__ == "__main__":
+    unittest.main()

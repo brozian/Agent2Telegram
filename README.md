@@ -15,6 +15,10 @@ back. No public IP, no webhook, no cloud — it runs on your own machine, behind
 Telegram  ⇄  Agent2Telegram  ⇄  claude / codex / antigravity
 ```
 
+**What you can send:** plain text, **images** and **files** (downloaded and handed to the
+agent), and **voice messages** — transcribed automatically when you add your own ElevenLabs
+key (see *Voice messages* below).
+
 ---
 
 ## Why it’s built this way
@@ -108,6 +112,19 @@ from Telegram.
 | `/help` | help |
 
 ---
+
+## Voice messages (optional)
+
+Voice notes are transcribed with **ElevenLabs Scribe** (`scribe_v1`) and the transcript is
+sent to the agent. It's **off by default** and uses **your own** API key — there is no shared
+key and no extra Python dependency.
+
+Enable it by setting your key (get one at <https://elevenlabs.io>):
+```bash
+export ELEVENLABS_API_KEY="sk_..."     # or put "elevenlabs_api_key" in config.json
+```
+Without a key, voice messages get a short "not enabled" notice. Images and files work with no
+extra setup.
 
 ## Configuration
 

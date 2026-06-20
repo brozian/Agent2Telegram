@@ -16,8 +16,10 @@ from __future__ import annotations
 import json
 import logging
 import queue
+import re
 import signal
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import __version__, adapters
@@ -25,6 +27,13 @@ from .config import Config, _state_dir
 from .telegram import TelegramClient
 
 log = logging.getLogger("agent2telegram.bridge")
+
+
+@dataclass
+class Task:
+    """One unit of work for a chat: the prompt text and an optional downloaded file."""
+    text: str = ""
+    attachment: str | None = None   # absolute path to a downloaded image/document, if any
 
 _HELP = (
     "🤖 *Agent2Telegram*\n"
@@ -43,6 +52,7 @@ class Bridge:
         self.tg = client or TelegramClient(cfg.token)
         self.adapter = adapters.build(cfg)
         self._allowed = set(cfg.allowed_user_ids)
+        self._stt_key = cfg.elevenlabs_api_key
         self._stop = threading.Event()
         self._workers: dict[int, "_ChatWorker"] = {}
         self._workers_lock = threading.Lock()
@@ -105,6 +115,8 @@ class Bridge:
             w.join(timeout=5)
 
     # ---- dispatch ----------------------------------------------------------
+    _SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
+
     def _dispatch(self, update: dict) -> None:
         msg = update.get("message")
         if not msg:
@@ -112,7 +124,7 @@ class Bridge:
         chat_id = msg["chat"]["id"]
         user = msg.get("from", {})
         user_id = user.get("id")
-        text = (msg.get("text") or "").strip()
+        text = (msg.get("text") or msg.get("caption") or "").strip()
 
         if text.startswith("/") and self._handle_command(chat_id, user_id, text):
             return
@@ -127,11 +139,78 @@ class Bridge:
             )
             return
 
-        if not text:
-            self.tg.send_message(chat_id, "ℹ️ I can only handle text messages right now.")
-            return
+        task = self._build_task(chat_id, msg, text)
+        if task is not None:
+            self._enqueue(chat_id, task)
 
-        self._enqueue(chat_id, text)
+    def _build_task(self, chat_id: int, msg: dict, text: str) -> "Task | None":
+        # Image → download the largest size and attach it.
+        if msg.get("photo"):
+            path = self._download(chat_id, msg["photo"][-1]["file_id"], default_name="image.jpg")
+            if not path:
+                self.tg.send_message(chat_id, "⚠️ Couldn't download the image.")
+                return None
+            return Task(text=text, attachment=path)
+        # Document / arbitrary file.
+        if msg.get("document"):
+            doc = msg["document"]
+            path = self._download(chat_id, doc["file_id"], default_name=doc.get("file_name") or "file")
+            if not path:
+                self.tg.send_message(chat_id, "⚠️ Couldn't download the file.")
+                return None
+            return Task(text=text, attachment=path)
+        # Voice / audio → transcribe (only if a key is configured).
+        media = msg.get("voice") or msg.get("audio")
+        if media:
+            if not self._stt_key:
+                self.tg.send_message(
+                    chat_id, "🎤 Voice messages aren't enabled. Add an ElevenLabs API key "
+                    "(ELEVENLABS_API_KEY) to transcribe them.")
+                return None
+            transcript = self._transcribe(chat_id, media["file_id"])
+            if not transcript:
+                return None
+            self.tg.send_message(chat_id, f"📝 _{transcript}_", parse_mode="Markdown")
+            return Task(text=transcript)
+        if text:
+            return Task(text=text)
+        self.tg.send_message(chat_id, "ℹ️ I can handle text, images, files and (if enabled) voice.")
+        return None
+
+    def _download(self, chat_id: int, file_id: str, *, default_name: str) -> str | None:
+        try:
+            file_path = self.tg.get_file_path(file_id)
+            data = self.tg.download(file_path)
+        except Exception as e:
+            log.error("attachment download failed: %s", e)
+            return None
+        name = self._SAFE_NAME.sub("_", Path(default_name).name) or "file"
+        if "." not in name and (ext := Path(file_path).suffix):
+            name += ext
+        dest = self._unique(self.chat_dir(chat_id) / "attachments" / name)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+        return str(dest)
+
+    @staticmethod
+    def _unique(p: Path) -> Path:
+        if not p.exists():
+            return p
+        i = 1
+        while (cand := p.with_name(f"{p.stem}-{i}{p.suffix}")).exists():
+            i += 1
+        return cand
+
+    def _transcribe(self, chat_id: int, file_id: str) -> str | None:
+        from . import stt
+        try:
+            file_path = self.tg.get_file_path(file_id)
+            audio = self.tg.download(file_path)
+            return stt.transcribe(audio, api_key=self._stt_key, filename=Path(file_path).name or "voice.ogg")
+        except Exception as e:
+            log.error("voice transcription failed: %s", e)
+            self.tg.send_message(chat_id, f"⚠️ Couldn't transcribe the voice message: {e}")
+            return None
 
     def _handle_command(self, chat_id: int, user_id: int | None, text: str) -> bool:
         cmd = text.split()[0].lstrip("/").split("@")[0].lower()
@@ -157,14 +236,14 @@ class Bridge:
         return False  # not a known command → treat as a normal prompt
 
     # ---- per-chat workers --------------------------------------------------
-    def _enqueue(self, chat_id: int, text: str) -> None:
+    def _enqueue(self, chat_id: int, task: "Task") -> None:
         with self._workers_lock:
             worker = self._workers.get(chat_id)
             if worker is None:
                 worker = _ChatWorker(chat_id, self)
                 self._workers[chat_id] = worker
                 worker.start()
-        worker.submit(text)
+        worker.submit(task)
 
     def chat_dir(self, chat_id: int) -> Path:
         return self.cfg.path_workdir() / str(chat_id)
@@ -179,14 +258,19 @@ class Bridge:
     def _marker(chat_dir: Path) -> Path:
         return chat_dir / ".a2t_started"
 
-    def process(self, chat_id: int, text: str) -> None:
-        """Run the agent for one message and reply. Runs inside a chat worker thread."""
+    def process(self, chat_id: int, task: "Task") -> None:
+        """Run the agent for one task and reply. Runs inside a chat worker thread."""
         chat_dir = self.chat_dir(chat_id)
+        prompt = task.text
+        if task.attachment:
+            note = (f"[The user attached a file, saved at: {task.attachment}\n"
+                    f"Open and use it as appropriate.]")
+            prompt = f"{prompt}\n\n{note}".strip() if prompt else note
         # Continue an existing conversation only after a *successful* first turn (marker).
         is_cont = self._marker(chat_dir).exists()
         with self._keep_typing(chat_id):
             try:
-                reply = self.adapter.run(text, chat_dir=chat_dir, is_continuation=is_cont)
+                reply = self.adapter.run(prompt, chat_dir=chat_dir, is_continuation=is_cont)
             except Exception as e:
                 log.error("agent run failed for chat %s: %s", chat_id, e)
                 self.tg.send_message(chat_id, f"⚠️ Agent error: {e}")
@@ -242,20 +326,20 @@ class _ChatWorker(threading.Thread):
         super().__init__(daemon=True, name=f"chat-{chat_id}")
         self.chat_id = chat_id
         self.bridge = bridge
-        self.q: queue.Queue[str | None] = queue.Queue()
+        self.q: queue.Queue = queue.Queue()
 
-    def submit(self, text: str) -> None:
-        self.q.put(text)
+    def submit(self, task) -> None:
+        self.q.put(task)
 
     def stop(self) -> None:
         self.q.put(None)
 
     def run(self) -> None:
         while True:
-            text = self.q.get()
-            if text is None:
+            task = self.q.get()
+            if task is None:
                 return
             try:
-                self.bridge.process(self.chat_id, text)
+                self.bridge.process(self.chat_id, task)
             except Exception as e:  # belt and braces: a worker must never die silently
                 log.exception("worker %s crashed handling a message: %s", self.chat_id, e)

@@ -6,5 +6,6 @@
   "command": null,
   "continue_command": null,
   "agent_timeout": 600,
-  "poll_timeout": 50
+  "poll_timeout": 50,
+  "elevenlabs_api_key": ""
 }

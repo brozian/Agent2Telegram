@@ -120,6 +120,22 @@ class TelegramClient:
             timeout=timeout + 15,
         )
 
+    def get_file_path(self, file_id: str) -> str:
+        return self._call("getFile", {"file_id": file_id}, timeout=20)["file_path"]
+
+    def download(self, file_path: str, *, timeout: float = 120) -> bytes:
+        """Download a file the bot has access to (returned by getFile)."""
+        url = f"{API_ROOT}/file/bot{self._token}/{file_path}"
+        last = None
+        for attempt in range(1, 4):
+            try:
+                with self._opener.open(urllib.request.Request(url), timeout=timeout) as resp:
+                    return resp.read()
+            except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+                last = e
+                self._backoff(attempt)
+        raise TelegramError(f"download failed: {last}")
+
     def send_chat_action(self, chat_id: int, action: str = "typing") -> None:
         try:
             self._call("sendChatAction", {"chat_id": chat_id, "action": action}, timeout=15)

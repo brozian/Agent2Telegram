@@ -50,6 +50,11 @@ token and their Telegram user id, then write `~/.config/agent2telegram/config.js
 …and `chmod 600` it. To get the user's id: have them message the bot, then read it from
 `getUpdates`, or ask them to send `/id` to the bot once it's running.
 
+**Attachments & voice:** images and files work out of the box (they're downloaded and handed
+to the agent). Voice transcription is optional — ask the user if they want it; if yes, add
+their **own** ElevenLabs key as `elevenlabs_api_key` (or `ELEVENLABS_API_KEY`). Never use a
+shared/hardcoded key.
+
 ## Verify (do not skip)
 ```bash
 python3 -m agent2telegram doctor
