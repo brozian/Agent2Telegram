@@ -144,6 +144,10 @@ def _codex_tool_summary(payload: dict) -> str:
         if name == "apply_patch":
             return "✏️ " + _short("apply_patch")
         return "🛠️ " + _short(name)
+    if pt == "web_search_call":
+        action = payload.get("action") if isinstance(payload.get("action"), dict) else {}
+        q = action.get("query") or (action.get("queries") or [""])[0] or ""
+        return "🔎 Web search: " + _short(q) if q else "🔎 Searching the web"
     return "🛠️ tool"
 
 
@@ -178,9 +182,13 @@ class CodexReader:
                 ts = rec.get("timestamp", "")
                 yield Ev("text", text=msg, key=f"{ts}:{_hash(msg)}",
                          final=(p.get("phase") == "final_answer"))
-        elif t == "response_item" and pt in ("function_call", "custom_tool_call"):
-            cid = p.get("call_id") or _hash(json.dumps(p, sort_keys=True)[:200])
-            yield Ev("tool", text=_codex_tool_summary(p), key=cid)
+        elif t == "response_item" and pt in ("function_call", "custom_tool_call", "web_search_call"):
+            if pt == "web_search_call":
+                action = p.get("action") if isinstance(p.get("action"), dict) else {}
+                key = "web:" + (action.get("query") or "search")     # stable across status updates
+            else:
+                key = p.get("call_id") or _hash(json.dumps(p, sort_keys=True)[:200])
+            yield Ev("tool", text=_codex_tool_summary(p), key=key)
         elif t == "event_msg" and pt == "task_complete":
             yield Ev("turn_end")
 
