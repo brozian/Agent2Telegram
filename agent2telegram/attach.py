@@ -334,6 +334,15 @@ class AttachBridge:
             self.tg.send_message(chat_id, "⛔ Not authorized.")
             return
 
+        # Bridge-level slash commands (e.g. /start, /help) are answered here instead of being
+        # forwarded to the agent — so the first contact is a friendly intro, not the agent
+        # puzzling over "/start". Only plain-text commands, never media captions.
+        text0 = (msg.get("text") or "").strip()
+        if text0.startswith("/") and not (msg.get("voice") or msg.get("audio")
+                                           or msg.get("photo") or msg.get("document")):
+            if self._handle_command(text0, chat_id):
+                return
+
         # Light "typing…" from the very first moment — including the voice-transcription /
         # file-download window (seconds), so the indicator never has a gap at the start.
         self._consume_turn_end()                 # drop any stale end-marker from a prior turn
@@ -366,6 +375,28 @@ class AttachBridge:
         except Exception as e:
             log.error("inject failed: %s", e)
             self._turn_active.clear()
+
+    def _handle_command(self, text: str, chat_id: int) -> bool:
+        """Answer a bridge-level slash command. Returns True if handled (don't forward to agent)."""
+        cmd = text.split()[0].lstrip("/").split("@")[0].lower()
+        labels = {"codex": "Codex", "claude-code": "Claude Code"}
+        agent = labels.get(self.cfg.agent, self.cfg.agent)
+        if cmd in ("start", "help"):
+            self.tg.send_message(chat_id,
+                f"👋 You're connected to a live *{agent}* session via Agent2Telegram.\n\n"
+                "Just send a message — it goes straight to the agent and you'll see typing, live "
+                "progress, what tools it runs, and the reply. You can also send *voice notes*, "
+                "*photos* and *files*, and react with ❤️ as quick feedback.\n\n"
+                "Commands: /help · /status · /id")
+            return True
+        if cmd == "id":
+            self.tg.send_message(chat_id, f"Your Telegram id: `{chat_id}`")
+            return True
+        if cmd == "status":
+            self.tg.send_message(chat_id,
+                f"✅ Connected — *{agent}* in tmux session `{self.cfg.tmux_session}`.")
+            return True
+        return False    # unknown command → let the agent handle it
 
     def _typing_loop(self) -> None:
         """Dedicated thread: assert "typing…" every TYPING_INTERVAL while a turn is active.

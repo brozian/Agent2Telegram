@@ -111,11 +111,12 @@ from Telegram.
 
 | Command | What it does |
 |---|---|
-| *(any text)* | sent to the agent as a prompt |
-| `/reset` | start a fresh conversation |
+| *(any text)* | sent straight to the live agent |
+| `/start`, `/help` | short intro + what you can send |
+| `/status` | which agent + tmux session you're connected to |
 | `/id` | show your user / chat id (handy for the allow‑list) |
-| `/status` | bridge + agent status |
-| `/help` | help |
+
+Anything that isn't one of these (including other `/commands`) is passed through to the agent.
 
 ---
 
