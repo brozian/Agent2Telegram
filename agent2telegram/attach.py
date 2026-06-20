@@ -1,14 +1,14 @@
 """Attach mode — drive an existing live agent session, the way a hand-rolled bridge does.
 
-Async model (mirrors a proven setup):
-  * **inbound**: poll Telegram → inject the message into the live tmux session via send-keys.
-    No blocking wait.
-  * **outbound** (background thread):
-      - tail the agent transcript; lines starting with the progress marker (e.g. ``[tg]``)
-        are sent **live** during the turn (interim/multi-part updates);
-      - watch the Stop-hook signal file; when it appears it's the **final** answer of a turn
-        that did *not* use the marker — send it.
-  * a "typing…" indicator runs while a turn is in flight.
+Async model:
+  * **inbound** (main thread): poll Telegram → inject each message into the live tmux session
+    via send-keys. No blocking wait.
+  * **outbound** (background thread): tail the agent transcript and, via an agent-specific
+    :mod:`reader`, forward every assistant message of Telegram-originated turns, drive a live
+    one-line tool-call status bubble, and detect end-of-turn (Codex: ``task_complete`` in the
+    log; Claude Code: a marker its Stop hook writes; plus an idle fallback).
+  * **typing** (background thread): assert "typing…" while a turn is in flight, independent of
+    the send path so a flood-control sleep can't starve it.
 
 This keeps the agent's full session (context, persona, tools) and adds Telegram I/O around it.
 """
@@ -18,6 +18,7 @@ import glob
 import html
 import json
 import logging
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -57,10 +58,9 @@ class AttachBridge:
         self._origins = tuple({p for p in (cfg.origin_prefix.strip(), "Telegram:", "[TG]") if p})
         self._owner_chat = cfg.allowed_user_ids[0] if cfg.allowed_user_ids else None
         self._signal = Path(cfg.signal_file) if cfg.signal_file else None
-        # Precise end-of-turn marker written by the agent's Stop hook; lets "typing…" stay lit
-        # continuously through long thinking/tool runs and switch off exactly when the turn ends.
-        # Claude Code only: end-of-turn marker its Stop hook writes. Codex has no hook — its
-        # rollout log records task_complete, so the reader signals turn end directly.
+        # Claude Code only: end-of-turn marker its Stop hook writes (keeps "typing…" lit through
+        # long thinking and off exactly at turn end). Codex needs none — its rollout records
+        # task_complete, so the reader signals turn end directly.
         self._turn_end = (self._signal.parent / "turn_end") if self._signal else None
         # Codex writes a fresh rollout-*.jsonl per session under ~/.codex/sessions; auto-detect
         # the newest one (and re-detect if the session restarts). Claude Code uses a fixed path.
@@ -113,8 +113,42 @@ class AttachBridge:
         except OSError:
             return None
 
+    def _session_cwd(self) -> str | None:
+        """Working directory of the driven tmux session — used to pick the matching Codex
+        rollout even when other `codex` processes (e.g. cron jobs) write newer rollouts."""
+        try:
+            out = subprocess.run(
+                ["tmux", "display-message", "-p", "-t", self.cfg.tmux_session, "#{pane_current_path}"],
+                capture_output=True, text=True, timeout=5)
+            return out.stdout.strip() or None
+        except (subprocess.SubprocessError, OSError):
+            return None
+
+    @staticmethod
+    def _rollout_cwd(path: Path) -> str | None:
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                rec = json.loads(f.readline() or "{}")
+            return (rec.get("payload") or {}).get("cwd")
+        except (OSError, json.JSONDecodeError, ValueError):
+            return None
+
     def _newest_rollout(self) -> Path | None:
-        return self._newest_under(self._codex_sessions_dir(), "rollout-*.jsonl", "*.jsonl")
+        base = self._codex_sessions_dir()
+        files = (glob.glob(str(base / "**" / "rollout-*.jsonl"), recursive=True)
+                 or glob.glob(str(base / "**" / "*.jsonl"), recursive=True))
+        if not files:
+            return None
+        try:
+            files.sort(key=lambda f: Path(f).stat().st_mtime, reverse=True)
+        except OSError:
+            return None
+        cwd = self._session_cwd()
+        if cwd:
+            for f in files:                       # newest first → our session's own rollout
+                if self._rollout_cwd(Path(f)) == cwd:
+                    return Path(f)
+        return Path(files[0])                     # fallback: newest overall
 
     def _resolve_transcript(self) -> Path | None:
         """Resolve the transcript to tail. An explicit path is used as-is; ``""``/``"auto"``
@@ -130,11 +164,12 @@ class AttachBridge:
         return None
 
     def _maybe_reresolve_codex(self) -> None:
-        """If Codex started a new session (newer rollout file), follow it from its start."""
-        if self.cfg.agent != "codex":
+        """If Codex restarted its session (new rollout for our tmux cwd), follow it from its start.
+        Never switches mid-turn, so an in-flight reply is never abandoned."""
+        if self.cfg.agent != "codex" or self._turn_active.is_set():
             return
         now = time.monotonic()
-        if now - self._last_resolve < 5.0:
+        if now - self._last_resolve < 10.0:
             return
         self._last_resolve = now
         newest = self._newest_rollout()
@@ -151,12 +186,14 @@ class AttachBridge:
                  me.get("username"), self.cfg.tmux_session, self._owner_chat)
         if not self._session.alive:
             raise RuntimeError(f"tmux session '{self.cfg.tmux_session}' not found")
-        # Resume at the start of the current turn (right after the last user message) rather
-        # than at EOF, so a reply written while we were restarting still gets forwarded. The
-        # persisted ledger dedups, so already-delivered progress/final messages aren't re-sent.
+        # Start tailing at EOF. If we've run before (the ledger has entries), rewind to the start
+        # of the current turn so a reply written while we were restarting still gets forwarded —
+        # the ledger dedups, so nothing already delivered is re-sent. On the very first run we do
+        # NOT rewind, so attaching to an already-busy session never re-posts its prior turn.
         if self._transcript and self._transcript.exists():
             self._tpos = self._transcript.stat().st_size
-            self._resume_position()
+            if self._sent_keys:
+                self._resume_position()
         self._cleanup_orphan_status()       # remove a bubble orphaned by a prior crash/restart
         # Typing runs in its own thread so a flood-control sleep in the send path never starves it.
         threading.Thread(target=self._outbound_loop, daemon=True).start()
