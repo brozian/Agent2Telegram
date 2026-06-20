@@ -113,7 +113,8 @@ from Telegram.
 |---|---|
 | *(any text)* | sent straight to the live agent |
 | `/start`, `/help` | short intro + what you can send |
-| `/status` | which agent + tmux session you're connected to |
+| `/status` | which agent + tmux session you're connected to (and whether voice is on) |
+| `/setkey <key>` | enable voice transcription with your ElevenLabs key — your message is deleted right after so the key isn't left in the chat |
 | `/id` | show your user / chat id (handy for the allow‑list) |
 
 Anything that isn't one of these (including other `/commands`) is passed through to the agent.

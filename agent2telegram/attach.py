@@ -340,7 +340,7 @@ class AttachBridge:
         text0 = (msg.get("text") or "").strip()
         if text0.startswith("/") and not (msg.get("voice") or msg.get("audio")
                                            or msg.get("photo") or msg.get("document")):
-            if self._handle_command(text0, chat_id):
+            if self._handle_command(text0, chat_id, msg.get("message_id")):
                 return
 
         # Light "typing…" from the very first moment — including the voice-transcription /
@@ -376,27 +376,56 @@ class AttachBridge:
             log.error("inject failed: %s", e)
             self._turn_active.clear()
 
-    def _handle_command(self, text: str, chat_id: int) -> bool:
+    def _handle_command(self, text: str, chat_id: int, message_id: int | None = None) -> bool:
         """Answer a bridge-level slash command. Returns True if handled (don't forward to agent)."""
-        cmd = text.split()[0].lstrip("/").split("@")[0].lower()
+        parts = text.split(maxsplit=1)
+        cmd = parts[0].lstrip("/").split("@")[0].lower()
+        arg = parts[1].strip() if len(parts) > 1 else ""
         labels = {"codex": "Codex", "claude-code": "Claude Code"}
         agent = labels.get(self.cfg.agent, self.cfg.agent)
         if cmd in ("start", "help"):
+            voice = "on" if self.cfg.elevenlabs_api_key else "off — enable with /setkey"
             self.tg.send_message(chat_id,
                 f"👋 You're connected to a live *{agent}* session via Agent2Telegram.\n\n"
                 "Just send a message — it goes straight to the agent and you'll see typing, live "
-                "progress, what tools it runs, and the reply. You can also send *voice notes*, "
-                "*photos* and *files*, and react with ❤️ as quick feedback.\n\n"
-                "Commands: /help · /status · /id")
+                "progress, what tools it runs, and the reply. You can also send *photos* and "
+                "*files*, and react with ❤️ as quick feedback.\n\n"
+                f"🎤 Voice transcription: {voice}.\n\n"
+                "Commands: /help · /status · /id · /setkey")
             return True
         if cmd == "id":
             self.tg.send_message(chat_id, f"Your Telegram id: `{chat_id}`")
             return True
         if cmd == "status":
+            voice = "✓" if self.cfg.elevenlabs_api_key else "✗"
             self.tg.send_message(chat_id,
-                f"✅ Connected — *{agent}* in tmux session `{self.cfg.tmux_session}`.")
+                f"✅ Connected — *{agent}* in tmux session `{self.cfg.tmux_session}`.\n"
+                f"🎤 Voice (ElevenLabs): {voice}")
             return True
+        if cmd == "setkey":
+            return self._set_voice_key(arg, chat_id, message_id)
         return False    # unknown command → let the agent handle it
+
+    def _set_voice_key(self, key: str, chat_id: int, message_id: int | None) -> bool:
+        """Save an ElevenLabs key to enable voice, then delete the message so the secret isn't
+        left in the chat history."""
+        if not key:
+            self.tg.send_message(chat_id,
+                "Usage: `/setkey <your ElevenLabs API key>` — enables voice-message transcription.\n"
+                "I'll delete your message right after so the key isn't left in the chat.")
+            return True
+        self.cfg.elevenlabs_api_key = key
+        try:
+            from .config import save
+            save(self.cfg)                       # persisted 0600 to the active config path
+        except Exception as e:
+            log.error("setkey: could not persist config: %s", e)
+        if message_id is not None:
+            self.tg.delete_message(chat_id, message_id)   # don't leave the secret in history
+        self.tg.send_message(chat_id,
+            "✅ Voice transcription enabled — key saved. I deleted your message so the key "
+            "isn't left in the chat history. Send a voice note to try it.")
+        return True
 
     def _typing_loop(self) -> None:
         """Dedicated thread: assert "typing…" every TYPING_INTERVAL while a turn is active.
@@ -596,7 +625,9 @@ class AttachBridge:
     def _transcribe(self, media: dict, chat_id: int) -> str | None:
         from . import stt
         if not self.cfg.elevenlabs_api_key:
-            self.tg.send_message(chat_id, "🎤 Voice isn't enabled (no ElevenLabs key).")
+            self.tg.send_message(chat_id,
+                "🎤 Voice transcription isn't enabled yet. Add your ElevenLabs key with "
+                "`/setkey <your-key>` (I'll delete the message right after) — then resend the voice note.")
             return None
         try:
             fp = self.tg.get_file_path(media["file_id"])
