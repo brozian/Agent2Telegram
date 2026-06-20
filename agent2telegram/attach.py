@@ -38,6 +38,12 @@ IDLE_DONE = 90.0
 #: under that window so a turn never shows a gap, even right after a sent message clears it.
 TYPING_INTERVAL = 1.5
 
+#: Codex only: hold the first scraped tool bubble until the turn's intro text has been forwarded
+#: (agents usually say what they'll do, THEN call the tool). The scraper is live but the Codex
+#: transcript text lags, so without this the bubble jumps ahead of the intro line. After this
+#: grace we show bubbles anyway, since some turns call a tool with no intro text.
+TUI_BUBBLE_GRACE = 3.0
+
 #: Registered with Telegram (setMyCommands) so typing "/" shows the command autocomplete menu.
 BOT_COMMANDS = [
     {"command": "start", "description": "Intro and what you can send"},
@@ -132,6 +138,7 @@ class AttachBridge:
         self._status_path = (self._signal.parent / "status_bubble") if self._signal else None
         self._seen_tools: set = set()
         self._tui_seen: set = set()          # Codex TUI scrape: tool lines already shown this turn
+        self._turn_text_sent = False         # has any text been forwarded this turn (bubble gate)
 
     # ---- transcript resolution --------------------------------------------
     def _codex_sessions_dir(self) -> Path:
@@ -405,6 +412,7 @@ class AttachBridge:
         self._typing_count = 1
         self._max_gap = 0.0
         self._last_typing = now
+        self._turn_text_sent = False             # gate TUI bubbles until intro text lands
         # Seed the TUI dedup with tool lines ALREADY on screen from previous turns, so the
         # scraper only emits calls that appear DURING this turn — otherwise stale lines still
         # visible in the pane get re-sent as bubbles under the new turn.
@@ -512,13 +520,18 @@ class AttachBridge:
         Codex (whose rollout logs tools only at completion) shows them live like Claude Code."""
         while not self._stop.is_set():
             if self._turn_active.is_set() and self._turn_from_tg and self._owner_chat is not None:
-                try:
-                    for summary in _extract_tui_tools(self._session._capture()):
-                        if summary not in self._tui_seen:
-                            self._tui_seen.add(summary)
-                            self._status_push(summary)
-                except Exception as e:
-                    log.debug("tui scrape: %s", e)
+                # Hold bubbles until the intro text is forwarded (so the bubble doesn't jump ahead
+                # of "I'll search the web…"), then release; after a short grace show them anyway.
+                ready = self._turn_text_sent or \
+                    (time.monotonic() - self._turn_started) >= TUI_BUBBLE_GRACE
+                if ready:
+                    try:
+                        for summary in _extract_tui_tools(self._session._capture()):
+                            if summary not in self._tui_seen:
+                                self._tui_seen.add(summary)
+                                self._status_push(summary)
+                    except Exception as e:
+                        log.debug("tui scrape: %s", e)
             self._stop.wait(1.0)
 
     def _consume_turn_end(self) -> None:
@@ -698,6 +711,7 @@ class AttachBridge:
                 self._status_clear()
                 _t0 = time.monotonic()
                 self.tg.send_message(self._owner_chat, out)
+                self._turn_text_sent = True     # release held tool bubbles — text landed first
                 log.info("FWD +%.1fs (send %.1fs) %r",
                          _t0 - self._turn_started, time.monotonic() - _t0, out[:30])
         elif ev.kind == "tool":
