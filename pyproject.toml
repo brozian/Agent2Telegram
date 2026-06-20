@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent2telegram"
+version = "1.0.0"
+description = "Connect a coding agent (Claude Code, Codex, Antigravity) to Telegram."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["telegram", "claude-code", "codex", "antigravity", "agent", "bot", "bridge"]
+# Core runtime intentionally has ZERO third-party dependencies (stdlib only) so it
+# installs cleanly anywhere. That is a feature, not an omission.
+dependencies = []
+
+[project.scripts]
+agent2telegram = "agent2telegram.__main__:main"
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+include = ["agent2telegram*"]
