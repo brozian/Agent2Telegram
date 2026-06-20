@@ -16,12 +16,36 @@ import html as _html
 import json
 import logging
 import re
+import socket
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 
 log = logging.getLogger("agent2telegram.telegram")
+
+_ipv4_patched = False
+
+
+def prefer_ipv4() -> None:
+    """Prefer IPv4 for outbound connections (idempotent, process-wide).
+
+    Some hosts have a broken/slow IPv6 route to Telegram — the connect hangs ~20s while IPv4 is
+    instant — and Python's default resolver order tries IPv6 first, so every API call stalls.
+    (curl avoids it via Happy Eyeballs; urllib doesn't.) We filter resolver results to IPv4 when
+    any exist, falling back to the full list on IPv6-only hosts."""
+    global _ipv4_patched
+    if _ipv4_patched:
+        return
+    _orig = socket.getaddrinfo
+
+    def _gai(host, port, family=0, *args, **kwargs):
+        res = _orig(host, port, family, *args, **kwargs)
+        v4 = [r for r in res if r[0] == socket.AF_INET]
+        return v4 or res
+
+    socket.getaddrinfo = _gai
+    _ipv4_patched = True
 
 API_ROOT = "https://api.telegram.org"
 #: Telegram rejects text messages longer than 4096 UTF-16 code units. We keep a margin.
@@ -97,6 +121,7 @@ class TelegramClient:
     def __init__(self, token: str, *, max_retries: int = 5, opener=None) -> None:
         if not token or ":" not in token:
             raise TelegramError("Invalid bot token.")
+        prefer_ipv4()                       # dodge slow/broken IPv6 routes to Telegram
         self._token = token
         self._max_retries = max_retries
         # `opener` is injectable so tests can run without touching the network.
