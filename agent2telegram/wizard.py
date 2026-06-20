@@ -39,12 +39,47 @@ def _ask(prompt: str, default: str = "") -> str:
 
 
 def _ask_secret(prompt: str) -> str:
-    """Read a secret (token / API key) without echoing it — so it never lands in the terminal
-    scrollback, screenshots, or shell history."""
+    """Read a secret (token / API key) with **live masking**: the first 4 characters show, the
+    rest appear as ``*`` as you type/paste. People expect to see *something* while typing (a fully
+    blank prompt confuses them), but the full secret still never lands in scrollback/screenshots.
+    Falls back to plain input when there's no real terminal (e.g. piped)."""
+    if not sys.stdin.isatty():
+        return _ask(prompt)
     try:
-        return getpass.getpass(f"{prompt}: ").strip()
-    except (EOFError, getpass.GetPassWarning):
-        return _ask(prompt)   # fall back to visible input if no tty
+        import termios
+        import tty
+    except ImportError:
+        return getpass.getpass(f"{prompt}: ").strip()   # non-Unix → hidden, no live mask
+
+    sys.stdout.write(f"{prompt}: ")
+    sys.stdout.flush()
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    buf: list[str] = []
+    try:
+        tty.setraw(fd)
+        while True:
+            ch = sys.stdin.read(1)
+            if ch in ("\r", "\n", "\x04"):          # Enter / Ctrl-D
+                break
+            if ch == "\x03":                         # Ctrl-C
+                raise KeyboardInterrupt
+            if ch in ("\x7f", "\b"):                 # backspace
+                if buf:
+                    buf.pop()
+                    sys.stdout.write("\b \b")
+                    sys.stdout.flush()
+                continue
+            if ord(ch) < 32:                         # ignore other control chars
+                continue
+            buf.append(ch)
+            sys.stdout.write(ch if len(buf) <= 4 else "*")
+            sys.stdout.flush()
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+    return "".join(buf).strip()
 
 
 def _yes(prompt: str, default_yes: bool = False) -> bool:
