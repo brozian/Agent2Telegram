@@ -75,6 +75,10 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("run", help="start the bridge")
     sub.add_parser("service", help="print a systemd/launchd service unit")
     sub.add_parser("doctor", help="diagnose config and agent availability")
+    st = sub.add_parser("selftest", help="end-to-end attach test against a real agent (no bot)")
+    st.add_argument("--agent", default="codex", choices=["codex", "claude-code"],
+                    help="which agent to test (default: codex)")
+    st.add_argument("--keep", action="store_true", help="keep the throwaway tmux session afterwards")
 
     args = parser.parse_args(argv)
     _setup_logging(args.verbose)
@@ -89,6 +93,9 @@ def main(argv: list[str] | None = None) -> int:
         return service.print_instructions()
     if args.command == "doctor":
         return _cmd_doctor(args)
+    if args.command == "selftest":
+        from . import selftest
+        return selftest.run(args.agent, keep=args.keep)
     parser.error("unknown command")
     return 2
 

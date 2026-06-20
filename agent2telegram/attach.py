@@ -133,6 +133,20 @@ class AttachBridge:
         except (OSError, json.JSONDecodeError, ValueError):
             return None
 
+    @staticmethod
+    def _norm(p: str | None) -> str:
+        """Normalize a path for comparison — resolves symlinks like /tmp → /private/tmp (macOS)."""
+        if not p:
+            return ""
+        try:
+            return str(Path(p).resolve())
+        except (OSError, RuntimeError):
+            return p
+
+    def _cwd_matches(self, rollout: Path) -> bool:
+        sc = self._session_cwd()
+        return bool(sc) and self._norm(self._rollout_cwd(rollout)) == self._norm(sc)
+
     def _newest_rollout(self) -> Path | None:
         base = self._codex_sessions_dir()
         files = (glob.glob(str(base / "**" / "rollout-*.jsonl"), recursive=True)
@@ -143,10 +157,10 @@ class AttachBridge:
             files.sort(key=lambda f: Path(f).stat().st_mtime, reverse=True)
         except OSError:
             return None
-        cwd = self._session_cwd()
+        cwd = self._norm(self._session_cwd())
         if cwd:
             for f in files:                       # newest first → our session's own rollout
-                if self._rollout_cwd(Path(f)) == cwd:
+                if self._norm(self._rollout_cwd(Path(f))) == cwd:
                     return Path(f)
             return None                           # cwd known but no rollout yet → wait, don't grab
         return Path(files[0])                     # cwd unknown → best-effort newest overall
@@ -161,29 +175,52 @@ class AttachBridge:
         if self.cfg.agent == "codex":
             return self._newest_rollout()
         if self.cfg.agent == "claude-code":
-            return self._newest_under(Path.home() / ".claude" / "projects")
+            return self._newest_claude()
         return None
 
-    def _maybe_reresolve_codex(self) -> None:
-        """Keep the tailed transcript pointed at our tmux session's own Codex rollout.
+    def _newest_claude(self) -> Path | None:
+        """Newest Claude Code transcript for the driven session, scoped by cwd so it never picks
+        up another concurrent Claude session (Claude stores transcripts under a per-cwd project
+        dir: ``~/.claude/projects/<cwd-with-slashes-as-dashes>/``)."""
+        base = Path.home() / ".claude" / "projects"
+        cwd = self._session_cwd()
+        dirs: list[Path] = []
+        if cwd:
+            for c in {cwd, self._norm(cwd)}:
+                d = base / c.replace("/", "-")
+                if d.is_dir():
+                    dirs.append(d)
+        if not dirs:
+            return self._newest_under(base) if not cwd else None
+        best, best_m = None, -1.0
+        for d in dirs:
+            p = self._newest_under(d, "*.jsonl")
+            try:
+                if p and p.stat().st_mtime > best_m:
+                    best, best_m = p, p.stat().st_mtime
+            except OSError:
+                pass
+        return best
 
-        Codex writes the rollout on the first message (not at TUI launch), and a session restart
-        starts a new one — so we re-check periodically. We switch when a better-matching rollout
-        appears, but never abandon a *correctly-attached* in-flight turn for a transient newer file."""
-        if self.cfg.agent != "codex":
-            return
+    def _maybe_reresolve(self) -> None:
+        """Keep the tailed transcript pointed at our tmux session's own log (auto mode only).
+
+        Agents write the transcript on the first message (not at launch), and a session restart
+        starts a new one — so we re-check periodically. We switch when a better match appears, but
+        never abandon a transcript we're already on for an in-flight turn. A no-op when the config
+        gives an explicit transcript path (the path resolves to itself)."""
+        if (self.cfg.transcript_path or "").strip().lower() not in ("", "auto"):
+            return                                # explicit path → nothing to re-resolve
         now = time.monotonic()
         if now - self._last_resolve < 3.0:
             return
         self._last_resolve = now
-        newest = self._newest_rollout()
+        newest = self._resolve_transcript()
         if not newest or newest == self._transcript:
             return
-        attached_ok = (self._transcript is not None
-                       and self._rollout_cwd(self._transcript) == self._session_cwd())
-        if attached_ok and self._turn_active.is_set():
-            return                                # correctly attached + busy → don't jump away
-        log.info("Codex rollout → %s", newest.name)
+        if self._transcript is not None and self._turn_active.is_set():
+            return                                # already attached + busy → don't jump away
+        log.info("transcript → %s", newest.name)
         self._transcript = newest
         self._tpos = 0
         self._resume_position()
@@ -376,7 +413,7 @@ class AttachBridge:
     def _outbound_loop(self) -> None:
         while not self._stop.is_set():
             try:
-                self._maybe_reresolve_codex()
+                self._maybe_reresolve()
                 self._drain_transcript()      # may set _pending_turn_end (Codex task_complete)
                 self._drain_signal()
                 # End-of-turn detection, in priority order:

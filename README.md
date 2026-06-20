@@ -121,6 +121,22 @@ from Telegram.
 
 ---
 
+## Self-test (no bot needed)
+
+Run the whole attach experience against a *real* agent with a fake Telegram — it needs no bot
+token and touches nothing live. It spins up a throwaway tmux session, launches the agent, and
+checks text round-trip, a ❤️ reaction, a multi-step task (tool-call status bubble), and voice
+transcription:
+
+```bash
+python3 -m agent2telegram selftest --agent codex
+python3 -m agent2telegram selftest --agent claude-code
+```
+
+Both report `6/6 checks passed` on a working setup.
+
+---
+
 ## Voice messages (optional)
 
 Voice notes are transcribed with **ElevenLabs Scribe** (`scribe_v1`) and the transcript is
