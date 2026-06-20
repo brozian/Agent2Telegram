@@ -29,8 +29,12 @@ from .telegram import TelegramClient
 
 log = logging.getLogger("agent2telegram.attach")
 
-#: How long the transcript must be quiet before we consider a turn finished.
-IDLE_DONE = 10.0
+#: Fallback only: how long the transcript may be quiet before we force-end a turn, in case
+#: the Stop-hook turn-end marker never arrives. The marker is the primary, precise signal —
+#: this just stops "typing…" from hanging forever if the hook is missing/misconfigured.
+IDLE_DONE = 90.0
+#: How often we re-assert the "typing…" chat action (Telegram shows it for ~5s).
+TYPING_INTERVAL = 2.0
 
 
 def _short(s: str, n: int = 58) -> str:
@@ -78,6 +82,9 @@ class AttachBridge:
         self._origins = tuple({p for p in (cfg.origin_prefix.strip(), "Telegram:", "[TG]") if p})
         self._owner_chat = cfg.allowed_user_ids[0] if cfg.allowed_user_ids else None
         self._signal = Path(cfg.signal_file) if cfg.signal_file else None
+        # Precise end-of-turn marker written by the agent's Stop hook; lets "typing…" stay lit
+        # continuously through long thinking/tool runs and switch off exactly when the turn ends.
+        self._turn_end = (self._signal.parent / "turn_end") if self._signal else None
         self._transcript = Path(cfg.transcript_path) if cfg.transcript_path else None
         self._session = TmuxSession([], name=cfg.tmux_session, cwd=Path.home(),
                                     origin_prefix=cfg.origin_prefix, boot_wait=0)
@@ -208,8 +215,10 @@ class AttachBridge:
 
         # Light "typing…" from the very first moment — including the voice-transcription /
         # file-download window (seconds), so the indicator never has a gap at the start.
+        self._consume_turn_end()                 # drop any stale end-marker from a prior turn
         self._turn_active.set()
         self._last_activity = time.monotonic()
+        self.tg.send_chat_action(self._owner_chat, "typing")   # instant, don't wait for the loop
 
         text = (msg.get("text") or msg.get("caption") or "").strip()
         if msg.get("voice") or msg.get("audio"):
@@ -231,24 +240,43 @@ class AttachBridge:
             log.error("inject failed: %s", e)
             self._turn_active.clear()
 
+    def _consume_turn_end(self) -> None:
+        if self._turn_end is not None:
+            try:
+                self._turn_end.unlink()
+            except OSError:
+                pass
+
+    def _end_turn(self) -> None:
+        """Finish the current turn: drop the technical bubble and stop the typing indicator."""
+        self._drain_transcript()          # catch anything written just before the Stop hook fired
+        self._status_clear()
+        self._turn_active.clear()
+        self._consume_turn_end()
+
     # ---- outbound (session → Telegram) ------------------------------------
     def _outbound_loop(self) -> None:
         while not self._stop.is_set():
             try:
                 self._drain_transcript()
                 self._drain_signal()
-                # Turn finished (transcript quiet) → remove the live status bubble, stop typing.
-                if self._turn_active.is_set() and time.monotonic() - self._last_activity > IDLE_DONE:
-                    self._status_clear()
-                    self._turn_active.clear()
+                if self._turn_active.is_set():
+                    # Primary signal: the Stop hook wrote the end-of-turn marker → end now,
+                    # so "typing…" tracks the real turn boundary, not transcript silence.
+                    if self._turn_end is not None and self._turn_end.exists():
+                        self._end_turn()
+                    # Fallback: force-end if the transcript went quiet for too long (hook missing).
+                    elif time.monotonic() - self._last_activity > IDLE_DONE:
+                        self._status_clear()
+                        self._turn_active.clear()
             except Exception as e:
                 log.error("outbound error: %s", e)
             self._stop.wait(0.4)
 
     # ---- live tool-call status bubble (shown during the turn, deleted at the end) ------
     def _status_push(self, line: str) -> None:
-        # Single line, emoji at the start, rendered in italics; edited in place as the
-        # current step changes, and deleted the moment a progress/final message appears.
+        # Single line, emoji at the start, rendered in italics; one bubble edited in place as
+        # the current step changes, removed once at turn end (not per step — that would flicker).
         if self._owner_chat is None or not line or line == self._status["shown"]:
             return
         body = f"<i>{html.escape(line)}</i>"
@@ -328,11 +356,12 @@ class AttachBridge:
                 if lines and lines[0].lstrip().startswith(self._marker):
                     lines[0] = lines[0].lstrip()[len(self._marker):].lstrip()   # strip internal cue
                 out = "\n".join(lines).strip()
-                if out and self._owner_chat is not None:
-                    self._status_clear()                 # content present → drop the technical bubble
-                    if uuid not in self._sent_keys:      # ledger dedups across restarts
-                        self._mark_sent(uuid)
-                        self.tg.send_message(self._owner_chat, out)
+                if out and self._owner_chat is not None and uuid not in self._sent_keys:
+                    # Keep the single technical bubble editing in place across tools AND progress
+                    # messages — don't delete+recreate per step (that flickers). It's removed once,
+                    # after the last technical step, at turn end / on the final answer.
+                    self._mark_sent(uuid)                # ledger dedups across restarts
+                    self.tg.send_message(self._owner_chat, out)
             # 2) Tool calls AFTER the text → a fresh live status bubble for the next steps.
             for b in blocks:
                 if isinstance(b, dict) and b.get("type") == "tool_use":
@@ -350,7 +379,7 @@ class AttachBridge:
         while not self._stop.is_set():
             if self._turn_active.is_set() and self._owner_chat is not None:
                 self.tg.send_chat_action(self._owner_chat, "typing")
-            self._stop.wait(3)
+            self._stop.wait(TYPING_INTERVAL)
 
     # ---- media helpers (reuse the same download/STT as one-shot mode) ------
     def _transcribe(self, media: dict, chat_id: int) -> str | None:
