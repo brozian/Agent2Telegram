@@ -83,7 +83,7 @@ class AttachBridge:
         self._turn_active = threading.Event()
         self._turn_from_tg = False           # is the current transcript turn Telegram-originated?
         self._last_activity = 0.0            # monotonic ts of last transcript activity (for typing)
-        self._status = {"mid": None, "lines": [], "shown": ""}   # live tool-call status bubble
+        self._status = {"mid": None, "shown": ""}   # live one-line tool-call status bubble
         self._seen_tools: set = set()
 
     # ---- lifecycle ---------------------------------------------------------
@@ -108,7 +108,7 @@ class AttachBridge:
         origin = self._origin.strip()
         try:
             with open(self._transcript, "rb") as f:
-                f.seek(max(0, self._tpos - 65536))
+                f.seek(max(0, self._tpos - 5_000_000))   # large window: tool outputs can be big
                 tail = f.read()
         except OSError:
             return
@@ -208,25 +208,22 @@ class AttachBridge:
 
     # ---- live tool-call status bubble (shown during the turn, deleted at the end) ------
     def _status_push(self, line: str) -> None:
-        if self._owner_chat is None:
-            return
-        self._status["lines"].append(line)
-        text = "🛠️ Working…\n" + "\n".join(self._status["lines"][-8:])
-        if text == self._status["shown"]:
+        # Single line, emoji at the start; edited in place as the current step changes.
+        if self._owner_chat is None or not line or line == self._status["shown"]:
             return
         if self._status["mid"] is None:
-            mid = self.tg.send_plain_id(self._owner_chat, text)
+            mid = self.tg.send_plain_id(self._owner_chat, line)
             if mid:
                 self._status["mid"] = mid
-                self._status["shown"] = text
+                self._status["shown"] = line
         else:
-            self.tg.edit_plain(self._owner_chat, self._status["mid"], text)
-            self._status["shown"] = text
+            self.tg.edit_plain(self._owner_chat, self._status["mid"], line)
+            self._status["shown"] = line
 
     def _status_clear(self) -> None:
         if self._status["mid"] is not None and self._owner_chat is not None:
             self.tg.delete_message(self._owner_chat, self._status["mid"])
-        self._status = {"mid": None, "lines": [], "shown": ""}
+        self._status = {"mid": None, "shown": ""}
         self._seen_tools.clear()
 
     def _drain_signal(self) -> None:
