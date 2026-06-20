@@ -55,9 +55,21 @@ class StreamBridge(AttachBridge):
     """Codex via ``codex exec --json``. Reuses AttachBridge's Telegram side; replaces the
     transcript-tailing source with a live subprocess event stream."""
 
+    @staticmethod
+    def _codex_bin() -> str:
+        """Resolve the codex binary: PATH, then the common ~/.local/bin install (which is on PATH
+        only in login shells), else bare 'codex'. Used as an absolute path when spawning, so a
+        minimal (non-login) launcher environment still finds it."""
+        found = shutil.which("codex")
+        if found:
+            return found
+        local = Path.home() / ".local" / "bin" / "codex"
+        return str(local) if local.exists() else "codex"
+
     def __init__(self, cfg: Config, *, client: TelegramClient | None = None) -> None:
-        if not shutil.which("codex"):
-            raise ValueError("stream mode needs the 'codex' CLI on PATH")
+        self._codex = self._codex_bin()
+        if self._codex == "codex" and not shutil.which("codex"):
+            log.warning("codex binary not found on PATH or ~/.local/bin — will try 'codex' anyway")
         # ---- Telegram-side state (mirrors AttachBridge.__init__, minus tmux/transcript) ----
         self.cfg = cfg
         self.tg = client or TelegramClient(cfg.token)
@@ -109,7 +121,9 @@ class StreamBridge(AttachBridge):
         base = ["codex", "exec", "--json"]
         if self.cfg.command:                        # user override (without {prompt})
             base = [a for a in self.cfg.command if a != "{prompt}"]
-        if self._thread_id:
+        if base and base[0] == "codex":             # spawn by absolute path (PATH-independent)
+            base[0] = self._codex
+        if self._thread_id:                          # ['codex','exec', ...] → insert resume <id>
             base = base[:2] + ["resume", self._thread_id] + base[2:]
         return base + [prompt]
 
