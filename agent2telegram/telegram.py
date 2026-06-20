@@ -146,6 +146,13 @@ class TelegramClient:
     def get_me(self) -> dict:
         return self._call("getMe", timeout=15)
 
+    def set_my_commands(self, commands: list[dict]) -> None:
+        """Register the bot's command list so Telegram shows the ``/`` autocomplete menu."""
+        try:
+            self._call("setMyCommands", {"commands": json.dumps(commands)}, timeout=15)
+        except TelegramError as e:
+            log.warning("setMyCommands failed: %s", e)   # cosmetic; never block startup
+
     def get_updates(self, offset: int, *, timeout: int = 50) -> list[dict]:
         # Network timeout must exceed the long-poll timeout, else we'd cancel mid-poll.
         return self._call(

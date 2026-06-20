@@ -38,6 +38,15 @@ IDLE_DONE = 90.0
 #: under that window so a turn never shows a gap, even right after a sent message clears it.
 TYPING_INTERVAL = 1.5
 
+#: Registered with Telegram (setMyCommands) so typing "/" shows the command autocomplete menu.
+BOT_COMMANDS = [
+    {"command": "start", "description": "Intro and what you can send"},
+    {"command": "help", "description": "Intro and what you can send"},
+    {"command": "status", "description": "Connection and voice status"},
+    {"command": "setkey", "description": "Enable voice (your ElevenLabs API key)"},
+    {"command": "id", "description": "Show your Telegram id"},
+]
+
 
 
 
@@ -230,6 +239,7 @@ class AttachBridge:
         me = self.tg.get_me()
         log.info("Attach bridge live as @%s → tmux '%s', owner=%s",
                  me.get("username"), self.cfg.tmux_session, self._owner_chat)
+        self.tg.set_my_commands(BOT_COMMANDS)    # enable the "/" command menu in Telegram
         if not self._session.alive:
             raise RuntimeError(f"tmux session '{self.cfg.tmux_session}' not found")
         # Start tailing at EOF. If we've run before (the ledger has entries), rewind to the start
