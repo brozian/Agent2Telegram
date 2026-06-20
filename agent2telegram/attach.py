@@ -227,8 +227,13 @@ class AttachBridge:
         newest = self._resolve_transcript()
         if not newest or newest == self._transcript:
             return
-        if self._transcript is not None and self._turn_active.is_set():
-            return                                # already attached + busy → don't jump away
+        # cwd-scoped resolution returns OUR session's own log, so follow it even mid-turn: a new
+        # rollout for the same session means the current turn is being written THERE. Blocking the
+        # switch while a turn was active caused a ~90s lag (it only switched after the idle timeout)
+        # — the first message looked like it took ~2 minutes. Only the cwd-unknown best-effort
+        # fallback still avoids jumping away during a live turn.
+        if self._session_cwd() is None and self._transcript is not None and self._turn_active.is_set():
+            return
         log.info("transcript → %s", newest.name)
         self._transcript = newest
         self._tpos = 0
