@@ -154,12 +154,16 @@ class AttachBridge:
             self._tpos = 0
         if size == self._tpos:
             return
-        with open(self._transcript, "r", encoding="utf-8", errors="ignore") as f:
+        with open(self._transcript, "rb") as f:
             f.seek(self._tpos)
             chunk = f.read()
-            self._tpos = f.tell()
-        for line in chunk.splitlines():
-            line = line.strip()
+        # Only consume up to the last complete line; keep a partial trailing line for next time.
+        nl = chunk.rfind(b"\n")
+        if nl == -1:
+            return
+        self._tpos += nl + 1
+        for raw in chunk[:nl].split(b"\n"):
+            line = raw.decode("utf-8", "ignore").strip()
             if not line:
                 continue
             try:
@@ -169,19 +173,21 @@ class AttachBridge:
             if rec.get("type") != "assistant":
                 continue
             uuid = rec.get("uuid", "")
-            for block in rec.get("message", {}).get("content", []):
-                if block.get("type") != "text":
-                    continue
-                for tline in block.get("text", "").splitlines():
-                    if tline.lstrip().startswith(self._marker):
-                        key = (uuid, tline)
-                        if key in self._sent_marker_keys:
-                            continue
-                        self._sent_marker_keys.add(key)
-                        clean = tline.lstrip()[len(self._marker):].strip()
-                        if clean and self._owner_chat is not None:
-                            self.tg.send_message(self._owner_chat, clean)
-                            self._turn_active.clear()
+            if uuid in self._sent_marker_keys:
+                continue
+            text = "\n".join(b.get("text", "") for b in rec.get("message", {}).get("content", [])
+                             if b.get("type") == "text")
+            lines = text.splitlines()
+            idx = next((i for i, ln in enumerate(lines) if ln.lstrip().startswith(self._marker)), None)
+            if idx is None:
+                continue
+            self._sent_marker_keys.add(uuid)
+            body = lines[idx:]
+            body[0] = body[0].lstrip()[len(self._marker):].lstrip()   # strip the marker
+            out = "\n".join(body).strip()
+            if out and self._owner_chat is not None:
+                self.tg.send_message(self._owner_chat, out)
+                self._turn_active.clear()
 
     # ---- typing indicator --------------------------------------------------
     def _typing_loop(self) -> None:
