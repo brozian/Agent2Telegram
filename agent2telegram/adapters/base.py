@@ -64,6 +64,7 @@ class Adapter:
                 text=True,
                 timeout=self._timeout,
                 check=False,
+                stdin=subprocess.DEVNULL,   # some CLIs read stdin; give them immediate EOF
             )
         except FileNotFoundError as e:
             raise AdapterError(
