@@ -64,6 +64,30 @@ def _restart(bridges: list[tuple[str, str | None]], src: Path) -> int:
     return restarted
 
 
+def _backfill_usernames() -> None:
+    """Fill in each bridge config's bot @username (non-secret) so other tools — e.g. the Agents
+    Monitoring dashboard — can show a 't.me/<bot>' link without ever touching the token."""
+    from .config import config_path, load, save
+    from .telegram import TelegramClient
+    d = config_path().parent
+    if not d.is_dir():
+        return
+    for p in sorted(d.glob("*.json")):
+        try:
+            cfg = load(p)
+        except Exception:
+            continue
+        if cfg.bot_username:
+            continue
+        try:
+            me = TelegramClient(cfg.token).get_me()
+            if me.get("username"):
+                cfg.bot_username = me["username"]
+                save(cfg, p)
+        except Exception:
+            pass
+
+
 def run() -> int:
     src = _src()
     if not (src / ".git").is_dir():
@@ -80,6 +104,7 @@ def run() -> int:
                           capture_output=True).returncode != 0:
             subprocess.run([sys.executable, "-m", "pip", "install", "--user",
                             "--break-system-packages", "--upgrade", str(src)], capture_output=True)
+    _backfill_usernames()
     bridges = _running_bridges()
     if bridges:
         n = _restart(bridges, src)

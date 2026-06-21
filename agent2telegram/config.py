@@ -43,6 +43,7 @@ class Config:
     origin_prefix: str = "Telegram:"    # injected before each message; hook forwards only these
     claude_session_id: str = ""         # guard: only act on this session's transcript
     progress_marker: str = "[tg]"       # lines starting with this are sent live (interim)
+    bot_username: str = ""              # the bot's @username (non-secret; for t.me/ deep links)
 
     def path_workdir(self) -> Path:
         base = Path(self.workdir).expanduser() if self.workdir else (_state_dir() / "chats")

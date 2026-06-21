@@ -248,6 +248,7 @@ def run() -> int:
         signal_file=str(state / "answer.txt"),
         origin_prefix="[TG] ",
         progress_marker="[TG]",
+        bot_username=me.get("username", ""),
     )
     if _yes("\nEnable voice messages via ElevenLabs Scribe?"):
         cfg.elevenlabs_api_key = _ask_secret("ElevenLabs API key (hidden)")
@@ -420,6 +421,7 @@ def connect(name: str | None = None) -> int:
         origin_prefix="[TG] ",
         progress_marker="[TG]",
         claude_session_id=(_claude_session_id_for(session) if agent_cls.name == "claude-code" else ""),
+        bot_username=me.get("username", ""),
     )
     path = save(cfg, cfg_path)
     print(f"\n✓ Saved bridge config to {path} (permissions 0600).")
