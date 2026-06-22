@@ -762,14 +762,26 @@ class AttachBridge:
         import re
         if msg.get("photo"):
             file_id, default = msg["photo"][-1]["file_id"], "image.jpg"
+            size = msg["photo"][-1].get("file_size")
         else:
             doc = msg["document"]
             file_id, default = doc["file_id"], doc.get("file_name") or "file"
+            size = doc.get("file_size")
+        # Telegram bots can only fetch files up to 20 MB via getFile — fail fast with a clear,
+        # actionable message instead of a silent "couldn't download".
+        if size and size > 20 * 1024 * 1024:
+            self.tg.send_message(chat_id,
+                f"⚠️ That file is ~{size // 1024 // 1024} MB. Telegram bots can only receive files up "
+                "to 20 MB — please share a link (Drive/Dropbox) or a smaller/zipped version.")
+            log.warning("attachment '%s' too big for the Bot API: %s bytes", default, size)
+            return ""
         try:
             fp = self.tg.get_file_path(file_id)
             data = self.tg.download(fp)
-        except Exception:
-            self.tg.send_message(chat_id, "⚠️ Couldn't download the attachment.")
+        except Exception as e:
+            log.warning("attachment '%s' download failed: %s", default, e)
+            self.tg.send_message(chat_id,
+                "⚠️ Couldn't download the attachment (too large, or a transient error — try again).")
             return ""
         name = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(default).name) or "file"
         if "." not in name and (ext := Path(fp).suffix):
@@ -778,4 +790,5 @@ class AttachBridge:
         d.mkdir(parents=True, exist_ok=True)
         dest = d / name
         dest.write_bytes(data)
+        log.info("saved attachment -> %s (%d bytes)", dest, len(data))
         return f"[The user attached a file saved at: {dest} — open and use it as appropriate.]"
