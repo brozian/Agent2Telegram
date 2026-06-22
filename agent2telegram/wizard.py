@@ -448,5 +448,40 @@ def connect(name: str | None = None) -> int:
     return 0
 
 
+def set_elevenlabs(config: str | None = None) -> int:
+    """`agent2telegram set-elevenlabs` — add/replace the ElevenLabs API key on an EXISTING bridge
+    config (enables voice-message transcription), then restart the running bridge(s) so it applies.
+    The key is entered with the same masked prompt as the bot token (first chars shown, rest as *)."""
+    import os
+    if config:
+        os.environ["AGENT2TELEGRAM_CONFIG"] = config
+    from .config import load, save, config_path, ConfigError
+    try:
+        cfg = load()
+    except ConfigError as e:
+        print(f"✗ {e}", file=sys.stderr)
+        return 2
+    print("Paste your ElevenLabs API key (hidden as you type).")
+    key = _ask_secret("ElevenLabs API key")
+    if not key:
+        print("Nothing entered — aborted.")
+        return 1
+    cfg.elevenlabs_api_key = key
+    path = save(cfg)
+    print(f"  ✓ Saved to {path} (permissions 0600).")
+    # Restart the running bridge(s) so the new key takes effect.
+    try:
+        from . import updater
+        bridges = updater._running_bridges()
+        if bridges:
+            n = updater._restart(bridges, updater._src())
+            print(f"  ✓ Restarted {n} bridge(s) — voice messages now transcribe via ElevenLabs.")
+        else:
+            print("  (no running bridge found — start it and the key will be picked up).")
+    except Exception as e:
+        print(f"  (restart skipped: {e}) — restart the bridge manually to apply the key.")
+    return 0
+
+
 if __name__ == "__main__":   # pragma: no cover
     sys.exit(run())
