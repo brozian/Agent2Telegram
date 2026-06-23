@@ -469,7 +469,25 @@ def set_elevenlabs(config: str | None = None) -> int:
     cfg.elevenlabs_api_key = key
     path = save(cfg)
     print(f"  ✓ Saved to {path} (permissions 0600).")
-    # Restart the running bridge(s) so the new key takes effect.
+    # One ElevenLabs account = one key for ALL bots. Apply it to every bridge config in the dir
+    # so voice works across all agents (Codex / Claude Code / Hermes / OpenClaw) after setting it
+    # once — not just the active bridge.
+    from .config import config_path, load as load_cfg
+    others = 0
+    for p in sorted(config_path().parent.glob("*.json")):
+        if p.resolve() == path.resolve():
+            continue
+        try:
+            other = load_cfg(p)
+        except Exception:
+            continue
+        if other.elevenlabs_api_key != key:
+            other.elevenlabs_api_key = key
+            save(other, p)
+            others += 1
+    if others:
+        print(f"  ✓ Applied the key to {others} other bridge config(s) too.")
+    # Restart ALL running bridges so the new key takes effect immediately (no manual restart).
     try:
         from . import updater
         bridges = updater._running_bridges()

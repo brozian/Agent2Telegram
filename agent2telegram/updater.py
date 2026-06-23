@@ -11,6 +11,7 @@ import os
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import agent2telegram
@@ -44,19 +45,65 @@ def _running_bridges() -> list[tuple[str, str | None]]:
     return out
 
 
+def _proc_env(pid: str) -> dict:
+    """Best-effort read of a process's own environment (Linux ``/proc/<pid>/environ``). Lets us
+    relaunch a bridge with the SAME ``AGENT2TELEGRAM_CONFIG`` / ``PYTHONPATH`` / ``PATH`` it was
+    started with — e.g. a supervisor (agentsmon, bridge_boot) starts attach-mode bridges via an
+    env var rather than a ``--config`` flag, so without this the relaunch would silently fall back
+    to the DEFAULT config and the bridge would come back wrong (or without the new key). Empty on
+    platforms without ``/proc`` (e.g. macOS), where the ``--config`` from the command line is used."""
+    try:
+        raw = Path(f"/proc/{pid}/environ").read_bytes()
+    except OSError:
+        return {}
+    env = {}
+    for chunk in raw.split(b"\x00"):
+        if b"=" in chunk:
+            k, _, v = chunk.partition(b"=")
+            try:
+                env[k.decode()] = v.decode()
+            except UnicodeDecodeError:
+                pass
+    return env
+
+
+def _wait_gone(pid: str, timeout: float = 6.0) -> None:
+    """Wait until *pid* has actually exited (so it releases the bot's getUpdates long-poll before
+    the replacement starts — two pollers on one token would 409). Escalates to SIGKILL near the end."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            os.kill(int(pid), 0)            # probe: alive?
+        except (OSError, ValueError):
+            return                          # gone
+        if deadline - time.time() < 2.0:
+            try:
+                os.kill(int(pid), signal.SIGKILL)
+            except (OSError, ValueError):
+                pass
+        time.sleep(0.2)
+
+
 def _restart(bridges: list[tuple[str, str | None]], src: Path) -> int:
     state = Path.home() / ".local" / "state" / "agent2telegram"
     state.mkdir(parents=True, exist_ok=True)
     log = open(state / "run.log", "a")
-    # Run from the refreshed source even if not pip-installed (harmless when it is).
-    env = os.environ.copy()
-    env["PYTHONPATH"] = str(src) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     restarted = 0
     for pid, cfg in bridges:
+        # Preserve the bridge's ORIGINAL environment (config selection, PYTHONPATH, PATH) so it
+        # comes back identical — critical for env-configured / multi-bridge setups.
+        penv = _proc_env(pid)
+        env = os.environ.copy()
+        for k in ("AGENT2TELEGRAM_CONFIG", "PYTHONPATH", "PATH"):
+            if penv.get(k):
+                env[k] = penv[k]
+        # Run from the refreshed source even if not pip-installed (harmless when it is).
+        env["PYTHONPATH"] = str(src) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
         try:
             os.kill(int(pid), signal.SIGTERM)
         except (OSError, ValueError):
             pass
+        _wait_gone(pid)                     # let it release the bot poll before the new one starts
         argv = [sys.executable, "-m", "agent2telegram", "run"] + (["--config", cfg] if cfg else [])
         subprocess.Popen(argv, env=env, stdout=log, stderr=subprocess.STDOUT,
                          stdin=subprocess.DEVNULL, start_new_session=True)
