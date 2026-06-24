@@ -623,10 +623,50 @@ class AttachBridge:
             except OSError:
                 pass
 
+    def _last_assistant_text(self) -> str | None:
+        """The most recent assistant text in the transcript (the turn's final answer). Read-only
+        tail scan — used purely by the turn-end backstop, doesn't touch the live _tpos cursor."""
+        if not self._transcript:
+            return None
+        try:
+            size = self._transcript.stat().st_size
+            with open(self._transcript, "rb") as f:
+                f.seek(max(0, size - 2_000_000))
+                tail = f.read()
+        except OSError:
+            return None
+        last = None
+        for raw in tail.split(b"\n"):
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line.decode("utf-8", "ignore"))
+            except (ValueError, json.JSONDecodeError):
+                continue
+            try:
+                for ev in self._reader.parse(rec):
+                    if ev.kind == "text" and ev.text and ev.text.strip():
+                        last = ev.text
+            except Exception:
+                continue
+        return last
+
     def _finish_turn(self) -> None:
         """Drop the technical bubble and stop the typing indicator at the real end of a turn."""
         self._status_clear()
         was_active = self._turn_active.is_set()
+        # Backstop: a Telegram-originated turn must NEVER go unanswered. If nothing was forwarded
+        # this turn (the [tg] marker was forgotten, the turn was a long heads-down working stretch,
+        # or interim forwarding missed it), deliver the final assistant message now. The
+        # `_turn_text_sent` guard means this only fires when truly nothing was sent (no double-send),
+        # and _send_final sets it True so a second _finish_turn won't re-fire.
+        if was_active and self._turn_from_tg and not self._turn_text_sent and self._owner_chat is not None:
+            last = self._last_assistant_text()
+            out = self._strip_marker(last) if last else ""
+            if out:
+                self._send_final(out)
+                log.info("TURN END backstop → forwarded final answer %r", out[:30])
         self._turn_active.clear()
         self._pending_turn_end = False
         self._consume_turn_end()
