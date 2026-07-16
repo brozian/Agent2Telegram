@@ -102,7 +102,7 @@ class TmuxSession:
         if self._origin:
             text = f"{self._origin}{text}"
         _tmux("send-keys", "-t", self.name, "C-u"); time.sleep(0.05)
-        _tmux("send-keys", "-t", self.name, "-l", "--", text); time.sleep(0.15)
+        _tmux("send-keys", "-t", self.name, "-l", "--", text); time.sleep(1.0)
         _tmux("send-keys", "-t", self.name, "Enter")
 
     def _capture(self) -> str:
