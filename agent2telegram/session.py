@@ -1,15 +1,15 @@
-"""Persistent agent sessions over **tmux** — the same approach as a hand-rolled bridge that
+﻿"""Persistent agent sessions over **tmux** â€” the same approach as a hand-rolled bridge that
 drives a live TUI, generalized into a product.
 
 Why tmux: it keeps the agent's *interactive* session alive, so full context, loaded tools
-and working state persist across messages — exactly like talking to it in a terminal. It
-works for any agent that has an interactive CLI (Claude Code, Codex, …).
+and working state persist across messages â€” exactly like talking to it in a terminal. It
+works for any agent that has an interactive CLI (Claude Code, Codex, â€¦).
 
 Inbound (proven send-keys sequence): clear the prompt line (``C-u``), type the message
 literally (``send-keys -l --``), then submit (``Enter``). Newlines are collapsed so a single
 Enter submits the whole message.
 
-Completion + response — two strategies:
+Completion + response â€” two strategies:
   * **Hook** (robust, used for Claude Code): the agent runs a Stop hook at end of turn that
     writes the final answer to a per-session signal file; the bridge waits for it. This is
     authoritative (reads the transcript, not the screen). Set up by the installer.
@@ -30,9 +30,9 @@ log = logging.getLogger("agent2telegram.session")
 
 # TUI chrome filters for the idle (screen-scraping) path. capture-pane gives plain text
 # (no ANSI), so we only strip recognizable decoration lines and leading bullet markers.
-_SEP_RE = re.compile(r"^[\s─━—–_=·.\-]{6,}$")
-_STATUS_RE = re.compile(r"^[✻✶✳✢✺✷*]\s")           # spinner/status, e.g. "✻ Worked for 1s"
-_BULLET_RE = re.compile(r"^\s*[⏺●○•]\s?")           # assistant output bullet
+_SEP_RE = re.compile(r"^[\sâ”€â”â€”â€“_=Â·.\-]{6,}$")
+_STATUS_RE = re.compile(r"^[âś»âś¶âśłâś˘âśşâś·*]\s")           # spinner/status, e.g. "âś» Worked for 1s"
+_BULLET_RE = re.compile(r"^\s*[âŹşâ—Źâ—‹â€˘]\s?")           # assistant output bullet
 
 
 def _clean_tui(text: str) -> str:
@@ -43,7 +43,7 @@ def _clean_tui(text: str) -> str:
             continue
         if _SEP_RE.match(s):
             continue
-        if s.lstrip().startswith("❯") or s.lstrip().startswith(">"):   # prompt / input echo
+        if s.lstrip().startswith("âťŻ") or s.lstrip().startswith(">"):   # prompt / input echo
             continue
         if _STATUS_RE.match(s.lstrip()):
             continue
@@ -68,7 +68,7 @@ class TmuxSession:
                  boot_wait: float = 2.0) -> None:
         if shutil.which("tmux") is None:
             raise SessionError("tmux is not installed. Install tmux (e.g. `brew install tmux` "
-                               "or `apt install tmux`) — the persistent session needs it.")
+                               "or `apt install tmux`) â€” the persistent session needs it.")
         self.name = name or ("a2t_" + uuid.uuid4().hex[:10])
         self._timeout = timeout
         self._idle = idle
@@ -102,7 +102,7 @@ class TmuxSession:
         if self._origin:
             text = f"{self._origin}{text}"
         _tmux("send-keys", "-t", self.name, "C-u"); time.sleep(0.05)
-        _tmux("send-keys", "-t", self.name, "-l", "--", text); time.sleep(0.15)
+        _tmux("send-keys", "-t", self.name, "-l", "--", text); time.sleep(1.0)
         _tmux("send-keys", "-t", self.name, "Enter")
 
     def _capture(self) -> str:
